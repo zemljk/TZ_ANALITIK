@@ -1,0 +1,65 @@
+WITH FirstMessages AS (
+    -- Создаем CTE (Common Table Expression) для определения первых сообщений в каждом блоке
+    -- Фильтруем сообщения, оставляя только первое сообщение в блоке сообщений от клиента/менеджера 
+    SELECT
+        cm.message_id,
+        cm.entity_id,
+        cm.created_by,
+        cm.created_at,
+        cm.type,
+        -- Используем функцию LAG() для сравнения типа предыдущего сообщения с текущим
+        -- Если тип предыдущего сообщения отличается от текущего, то это первое сообщение в блоке
+        CASE
+            WHEN LAG(cm.type, 1, '') OVER (PARTITION BY cm.entity_id ORDER BY cm.created_at) <> cm.type THEN 1
+            ELSE 0
+        END AS is_first_message
+    FROM
+        test.chat_messages cm
+),
+ManagerResponses AS (
+    -- Создаем CTE для определения времени ответа менеджера на каждое входящее сообщение клиента
+    -- Находим минимальное время ответа менеджера для каждого входящего сообщения клиента
+    SELECT
+        fm.entity_id,
+        fm.created_by,
+        fm.created_at AS client_message_created_at,
+        -- Используем функцию MIN() с FILTER для определения минимального времени ответа менеджера в пределах блока сообщений
+        -- Фильтруем только исходящие сообщения менеджера после входящего сообщения клиента
+        MIN(fm2.created_at) FILTER (WHERE fm2.type = 'outgoing_chat_message' AND fm2.created_at >= fm.created_at) AS manager_response_created_at
+    FROM
+        FirstMessages fm -- Используем CTE FirstMessages с алиасом fm
+    JOIN
+        FirstMessages fm2 ON fm.entity_id = fm2.entity_id -- Соединяем CTE FirstMessages с собой по ID сделки
+    WHERE
+        fm.type = 'incoming_chat_message' AND fm.is_first_message = 1 AND fm2.is_first_message = 1 -- Фильтруем только первые входящие и исходящие сообщения
+    GROUP BY
+        fm.entity_id,
+        fm.created_by,
+        fm.created_at
+)
+SELECT
+    m.name_mop, -- Выбираем имя менеджера
+    r.rop_name, -- Выбираем имя руководителя отдела продаж
+    AVG(
+        -- Вычисляем среднее время ответа менеджера, учитывая нерабочее время
+        CASE
+            -- Если ответ менеджера был получен в рабочее время (с 9:30 до 00:00)
+            WHEN EXTRACT(HOUR FROM TO_TIMESTAMP(mr.manager_response_created_at)) >= 9 AND EXTRACT(HOUR FROM TO_TIMESTAMP(mr.manager_response_created_at)) < 24
+            -- Вычисляем разницу между временем ответа менеджера и временем входящего сообщения клиента
+            THEN mr.manager_response_created_at - mr.client_message_created_at
+            -- Если ответ был получен в нерабочее время, прибавляем 1 минуту 
+            ELSE 60
+        END
+    ) AS average_response_time -- Переименовываем столбец с результатом
+FROM
+    ManagerResponses mr -- Используем CTE ManagerResponses с алиасом mr
+JOIN
+    test.managers m ON mr.created_by = m.mop_id -- Соединяем CTE ManagerResponses с таблицей test.managers по ID менеджера
+LEFT JOIN
+    test.rops r ON m.rop_id = r.rop_id -- Соединяем test.managers с таблицей test.rops по ID руководителя (левое соединение)
+GROUP BY
+    m.name_mop,
+    r.rop_name -- Группируем результаты по имени менеджера и имени руководителя отдела продаж
+ORDER BY
+    r.rop_name,
+    m.name_mop; -- Сортируем результаты по имени руководителя и имени менеджера
